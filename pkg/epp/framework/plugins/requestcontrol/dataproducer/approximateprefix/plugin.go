@@ -263,12 +263,25 @@ func (p *dataProducer) makeserver(targetEndpoint fwksched.Endpoint) server {
 	}
 }
 
-// matchLongestPrefix returns a map of servers and length of prefix that each server caches, prefix length is defined in blocks.
+// discriminationStableBlocks is the number of consecutive blocks for which a
+// unique best server must remain the sole leader before matchLongestPrefix
+// stops early. Two blocks is enough to confirm the signal while avoiding
+// one-hash flukes.
+const discriminationStableBlocks = 2
+
+// matchLongestPrefix returns a map of servers and length of prefix that each
+// server caches, prefix length is defined in blocks. It stops early when a
+// unique best server has been stable for discriminationStableBlocks consecutive
+// blocks and at least two servers have any matches, since deeper lookups cannot
+// change the routing decision once discrimination is established.
 func (p *dataProducer) matchLongestPrefix(ctx context.Context, hashes []blockHash) map[ServerID]int {
 	loggerTrace := log.FromContext(ctx).V(logutil.TRACE)
 	res := make(map[ServerID]int)
 
-	// Use a greedy strategy to search from the longest prefix.
+	var prevBest ServerID
+	stableRun := 0
+	numMatching := 0
+
 	for _, hash := range hashes {
 		cachedServers := p.indexerInst.Get(hash)
 		if len(cachedServers) == 0 {
@@ -276,7 +289,36 @@ func (p *dataProducer) matchLongestPrefix(ctx context.Context, hashes []blockHas
 		}
 		loggerTrace.Info("Found cached servers", "cachedServers", cachedServers, "total # blocks", len(hashes))
 		for server := range cachedServers {
+			if res[server] == 0 {
+				numMatching++
+			}
 			res[server]++
+		}
+
+		if numMatching >= 2 {
+			var best ServerID
+			bestVal, bestCount := 0, 0
+			for s, v := range res {
+				if v > bestVal {
+					best, bestVal, bestCount = s, v, 1
+				} else if v == bestVal {
+					bestCount++
+				}
+			}
+			if bestCount == 1 {
+				if best == prevBest {
+					stableRun++
+					if stableRun >= discriminationStableBlocks {
+						break
+					}
+				} else {
+					prevBest = best
+					stableRun = 1
+				}
+			} else {
+				stableRun = 0
+				prevBest = ServerID{}
+			}
 		}
 	}
 	return res
