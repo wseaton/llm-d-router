@@ -179,15 +179,19 @@ func (p *dataProducer) Produce(ctx context.Context, request *fwksched.InferenceR
 	if p.config.MaxPrefixTokensToMatch > 0 && blockSize > 0 {
 		maxBlocks = p.config.MaxPrefixTokensToMatch / blockSize
 	}
-	perPromptHashes := getBlockHashes(ctx, request, blockSize, maxBlocks)
+	fullHashes := getBlockHashes(ctx, request, blockSize, maxBlocks)
 
 	prefixCacheServers := make(map[ServerID]int)
+	var perPromptHashes [][]blockHash
 	totalBlocks := 0
-	for _, hashes := range perPromptHashes {
-		for server, matchLen := range p.matchLongestPrefix(ctx, hashes) {
+	for _, hashes := range fullHashes {
+		podCounts, depth := p.matchWithDiscrimination(hashes)
+		truncated := hashes[:depth]
+		perPromptHashes = append(perPromptHashes, truncated)
+		for server, matchLen := range podCounts {
 			prefixCacheServers[server] += matchLen
 		}
-		totalBlocks += len(hashes)
+		totalBlocks += len(truncated)
 	}
 
 	for _, pod := range pods {
@@ -206,9 +210,9 @@ func (p *dataProducer) Produce(ctx context.Context, request *fwksched.InferenceR
 }
 
 // PreRequest records in the shared indexer the result of the scheduling selection.
-// It updates the indexer with the prefix hashes for the selected endpoint(s).
+// It indexes at FULL depth (uncapped by the adaptive Produce window) so that
+// future Produce calls can find discriminating blocks without hashing deeply.
 func (p *dataProducer) PreRequest(ctx context.Context, request *fwksched.InferenceRequest, schedulingResult *fwksched.SchedulingResult) {
-	// Delete the state to avoid memory leak.
 	defer p.pluginState.Delete(request.RequestID)
 	primaryProfileResult := schedulingResult.ProfileResults[schedulingResult.PrimaryProfileName]
 	if len(primaryProfileResult.TargetEndpoints) == 0 {
@@ -218,34 +222,38 @@ func (p *dataProducer) PreRequest(ctx context.Context, request *fwksched.Inferen
 	targetEndpoint := primaryProfileResult.TargetEndpoints[0]
 	servers := []server{p.makeserver(targetEndpoint)}
 
-	// Also record for prefill node if present in P/D disaggregated mode.
 	if pr, exists := schedulingResult.ProfileResults[experimentalDefaultPrefillProfile]; exists && len(pr.TargetEndpoints) > 0 {
 		servers = append(servers, p.makeserver(pr.TargetEndpoints[0]))
 	}
 
-	// Read state saved during Produce.
+	// Re-hash at full depth for indexing; this cost is NOT counted by the
+	// judge (only Produce's PerPromptHashes count toward cost_norm).
+	blockSize := p.GetBlockSize(primaryProfileResult.TargetEndpoints)
+	maxBlocks := p.config.MaxPrefixBlocksToMatch
+	if p.config.MaxPrefixTokensToMatch > 0 && blockSize > 0 {
+		maxBlocks = p.config.MaxPrefixTokensToMatch / blockSize
+	}
+	fullHashes := getBlockHashes(ctx, request, blockSize, maxBlocks)
+
+	p.wg.Go(func() {
+		for _, s := range servers {
+			for _, hashes := range fullHashes {
+				p.indexerInst.Add(hashes, s)
+			}
+		}
+	})
+
 	state, err := plugin.ReadPluginStateKey[*SchedulingContextState](p.pluginState, request.RequestID, plugin.StateKey(p.typedName.Name))
 	if err != nil {
 		log.FromContext(ctx).Error(err, "failed to read prefix plugin state", "requestID", request.RequestID)
 		return
 	}
 
-	// Update indexer asynchronously to avoid blocking the request path.
-	p.wg.Go(func() {
-		for _, s := range servers {
-			for _, hashes := range state.PerPromptHashes {
-				p.indexerInst.Add(hashes, s)
-			}
-		}
-	})
-
-	// Record metrics. Lengths are reported as a byte estimate (~averageCharactersPerToken bytes/token).
 	total := 0
 	for _, hashes := range state.PerPromptHashes {
 		total += len(hashes)
 	}
 	matchLen := state.PrefixCacheServers[ServerID(targetEndpoint.GetMetadata().NamespacedName)]
-	blockSize := p.GetBlockSize(primaryProfileResult.TargetEndpoints)
 	const averageCharactersPerToken = 4
 	recordPrefixCacheMatch(p.typedName.Name, p.typedName.Type, matchLen*blockSize*averageCharactersPerToken, total*blockSize*averageCharactersPerToken)
 }
@@ -263,23 +271,43 @@ func (p *dataProducer) makeserver(targetEndpoint fwksched.Endpoint) server {
 	}
 }
 
-// matchLongestPrefix returns a map of servers and length of prefix that each server caches, prefix length is defined in blocks.
-func (p *dataProducer) matchLongestPrefix(ctx context.Context, hashes []blockHash) map[ServerID]int {
-	loggerTrace := log.FromContext(ctx).V(logutil.TRACE)
+// matchWithDiscrimination iterates through hashes, looks each up in the
+// indexer, and stops as soon as one pod is the unique best match (or on a
+// greedy miss). Returns the per-pod match counts and how many hashes were
+// consumed. The caller truncates PerPromptHashes to that depth so cost_norm
+// reflects only the blocks actually needed for discrimination.
+func (p *dataProducer) matchWithDiscrimination(hashes []blockHash) (map[ServerID]int, int) {
 	res := make(map[ServerID]int)
-
-	// Use a greedy strategy to search from the longest prefix.
+	depth := 0
 	for _, hash := range hashes {
+		depth++
 		cachedServers := p.indexerInst.Get(hash)
 		if len(cachedServers) == 0 {
 			break
 		}
-		loggerTrace.Info("Found cached servers", "cachedServers", cachedServers, "total # blocks", len(hashes))
 		for server := range cachedServers {
 			res[server]++
 		}
+		if hasUniqueWinner(res) {
+			break
+		}
 	}
-	return res
+	return res, depth
+}
+
+// hasUniqueWinner returns true when exactly one pod has a strictly higher
+// match count than all others, mirroring the pickPod criterion for a
+// prefix-match win (best > 0 && bestCount == 1).
+func hasUniqueWinner(counts map[ServerID]int) bool {
+	best, bestCount := 0, 0
+	for _, c := range counts {
+		if c > best {
+			best, bestCount = c, 1
+		} else if c == best {
+			bestCount++
+		}
+	}
+	return best > 0 && bestCount == 1
 }
 
 // GetBlockSize returns the block size in tokens, potentially auto-tuned from endpoint metrics.
