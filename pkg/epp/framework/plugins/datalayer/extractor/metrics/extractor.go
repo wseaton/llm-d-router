@@ -52,6 +52,7 @@ const (
 
 	CacheConfigBlockSizeInfoMetricName = "block_size"
 	CacheConfigNumGPUBlocksMetricName  = "num_gpu_blocks"
+	PDConfigHashMetricName             = "pd_config_hash"
 )
 
 // Extractor implements the metrics extraction based on the model
@@ -262,6 +263,8 @@ func populateCacheInfoMetrics(clone *fwkdl.Metrics, metric *dto.Metric, blockSiz
 					*errs = append(*errs, err)
 				}
 			}
+		case PDConfigHashMetricName:
+			clone.PDConfigHash = label.GetValue()
 		}
 	}
 }
