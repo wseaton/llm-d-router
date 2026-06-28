@@ -318,7 +318,15 @@ func (h *Handler) Pick(ctx context.Context, request *scheduling.InferenceRequest
 		if _, executed := profileResults[h.prefillProfile]; !executed {
 			if h.pdDecider != nil && h.pdDecider.disaggregate(ctx, request, decodeRes.TargetEndpoints[0]) {
 				span.SetAttributes(attribute.String("llm_d.epp.profile_handler.decision", "run_prefill"))
-				return map[string]scheduling.SchedulerProfile{h.prefillProfile: profiles[h.prefillProfile]}
+				prefillProfile := profiles[h.prefillProfile]
+				decodeHash := decodeRes.TargetEndpoints[0].GetMetrics().PDConfigHash
+				if decodeHash != "" {
+					prefillProfile = &pdConfigHashFilterProfile{
+						inner:        prefillProfile,
+						requiredHash: decodeHash,
+					}
+				}
+				return map[string]scheduling.SchedulerProfile{h.prefillProfile: prefillProfile}
 			}
 			// Decider rejected prefill - mark as evaluated so we don't re-run the decider.
 			profileResults[h.prefillProfile] = nil
@@ -459,4 +467,33 @@ func (h *Handler) PreRequest(ctx context.Context, request *scheduling.InferenceR
 		attribute.Bool("llm_d.epp.encode.disaggregation_used", true),
 		attribute.String("llm_d.epp.encode.endpoints", strings.Join(encodeHostPorts, ",")),
 	)
+}
+
+// pdConfigHashFilterProfile wraps a SchedulerProfile and pre-filters candidate
+// endpoints to only those whose PDConfigHash matches requiredHash.  This
+// ensures prefill pods are only paired with decode pods that share a compatible
+// KV-transfer configuration.
+type pdConfigHashFilterProfile struct {
+	inner        scheduling.SchedulerProfile
+	requiredHash string
+}
+
+func (p *pdConfigHashFilterProfile) Run(ctx context.Context, request *scheduling.InferenceRequest, candidateEndpoints []scheduling.Endpoint) (*scheduling.ProfileRunResult, error) {
+	compatible := make([]scheduling.Endpoint, 0, len(candidateEndpoints))
+	for _, ep := range candidateEndpoints {
+		if ep.GetMetrics().PDConfigHash == p.requiredHash {
+			compatible = append(compatible, ep)
+		}
+	}
+	// Fail-open: when no candidate shares the decode endpoint's config hash,
+	// pass all candidates through to the inner profile.  The NIXL handshake
+	// is the authoritative compatibility check; this filter is an
+	// optimisation that avoids doomed pairings when the hash is available.
+	// Failing closed here would drop requests whenever metrics are stale or
+	// a backend does not yet expose the hash, which is worse than letting
+	// the handshake reject the rare mismatched pair.
+	if len(compatible) == 0 {
+		compatible = candidateEndpoints
+	}
+	return p.inner.Run(ctx, request, compatible)
 }

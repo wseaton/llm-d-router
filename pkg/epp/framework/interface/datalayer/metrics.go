@@ -36,6 +36,8 @@ type Metrics struct {
 	CacheBlockSize          int
 	// Number of GPU blocks in the model server for KV Cache.
 	CacheNumBlocks int
+	// PDConfigHash is the P/D compatibility hash from the model server.
+	PDConfigHash string
 
 	// UpdateTime records the last time when the metrics were updated.
 	UpdateTime time.Time
@@ -77,6 +79,7 @@ func (m *Metrics) Clone() *Metrics {
 		KvCacheMaxTokenCapacity: m.KvCacheMaxTokenCapacity,
 		CacheBlockSize:          m.CacheBlockSize,
 		CacheNumBlocks:          m.CacheNumBlocks,
+		PDConfigHash:            m.PDConfigHash,
 		UpdateTime:              m.UpdateTime,
 	}
 }
