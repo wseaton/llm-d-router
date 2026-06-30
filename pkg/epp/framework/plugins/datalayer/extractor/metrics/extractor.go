@@ -136,6 +136,18 @@ func (ext *Extractor) Extract(ctx context.Context, in fwkdl.PollInput[sourcemetr
 		}
 	}
 
+	if spec := mapping.LoraAdapterLoaded; spec != nil {
+		gpu, cpu := extractLoRAAdapterResidency(families, spec)
+		if gpu != nil {
+			clone.ActiveModels = gpu
+			updated = true
+		}
+		if cpu != nil {
+			clone.WaitingModels = cpu
+			updated = true
+		}
+	}
+
 	if spec := mapping.CacheInfo; spec != nil { // extract CacheInfo-specific metrics (labels)
 		metric, err := spec.getLatestMetric(families)
 		if err != nil {
@@ -273,4 +285,45 @@ func addAdapters(m map[string]int, csv string) {
 			m[trimmed] = 0
 		}
 	}
+}
+
+// extractLoRAAdapterResidency reads per-adapter gauge series and returns
+// GPU-active and CPU-only adapter maps.
+func extractLoRAAdapterResidency(families sourcemetrics.PrometheusMetricMap, spec *Spec) (gpu, cpu map[string]int) {
+	family, ok := families[spec.Name]
+	if !ok || family == nil {
+		return nil, nil
+	}
+
+	gpu = make(map[string]int)
+	cpu = make(map[string]int)
+
+	for _, m := range family.GetMetric() {
+		if !spec.labelsMatch(m.GetLabel()) {
+			continue
+		}
+		if extractValue(m) < 0.5 {
+			continue
+		}
+		var adapterName, level string
+		for _, lp := range m.GetLabel() {
+			switch lp.GetName() {
+			case "adapter_name":
+				adapterName = lp.GetValue()
+			case "level":
+				level = lp.GetValue()
+			}
+		}
+		if adapterName == "" {
+			continue
+		}
+		switch level {
+		case "gpu":
+			gpu[adapterName] = 0
+		case "cpu":
+			cpu[adapterName] = 0
+		}
+	}
+
+	return gpu, cpu
 }
