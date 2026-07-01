@@ -28,7 +28,10 @@ type Mapping struct {
 	TotalQueuedRequests  *Spec
 	TotalRunningRequests *Spec
 	KVCacheUtilization   *Spec
-	LoraRequestInfo      *LoRASpec
+	LoraRequestInfo *LoRASpec
+	// LoraAdapterLoaded points at the per-adapter residency gauge
+	// (vllm:lora_adapter_loaded{adapter_name,level,pinned}).
+	LoraAdapterLoaded *Spec
 	// CacheInfo is used for info-style gauge metrics where block_size and
 	// num_gpu_blocks are exposed as label values (e.g. vLLM, trtllm-serve, SGLang).
 	CacheInfo *Spec
@@ -51,6 +54,7 @@ type MappingConfig struct {
 	Running             string
 	KVUsage             string
 	Lora                string
+	LoraAdapterLoaded   string
 	CacheInfo           string
 	CacheBlockSizeLabel string
 	CacheNumBlocksLabel string
@@ -81,6 +85,7 @@ func (m *Mapping) specs() []namedSpec {
 		namedSpec{"running", m.TotalRunningRequests, m.TotalRunningRequests != nil},
 		namedSpec{"kv", m.KVCacheUtilization, m.KVCacheUtilization != nil},
 		namedSpec{"lora", loraSpec, m.LoraRequestInfo != nil},
+		namedSpec{"loraAdapterLoaded", m.LoraAdapterLoaded, m.LoraAdapterLoaded != nil},
 		namedSpec{"cacheInfo", m.CacheInfo, m.CacheInfo != nil},
 	)
 	for _, custom := range m.CustomMetrics {
@@ -149,6 +154,10 @@ func NewMappingFromConfig(cfg MappingConfig) (*Mapping, error) {
 	if err != nil {
 		errs = append(errs, err)
 	}
+	loraAdapterLoadedSpec, err := parseStringToSpec(cfg.LoraAdapterLoaded)
+	if err != nil {
+		errs = append(errs, err)
+	}
 	cacheInfoSpec, err := parseStringToSpec(cfg.CacheInfo)
 	if err != nil {
 		errs = append(errs, err)
@@ -172,6 +181,7 @@ func NewMappingFromConfig(cfg MappingConfig) (*Mapping, error) {
 		TotalRunningRequests: runningSpec,
 		KVCacheUtilization:   kvusageSpec,
 		LoraRequestInfo:      loraSpec,
+		LoraAdapterLoaded:    loraAdapterLoadedSpec,
 		CacheInfo:            cacheInfoSpec,
 		CacheBlockSizeLabel:  cfg.CacheBlockSizeLabel,
 		CacheNumBlocksLabel:  cfg.CacheNumBlocksLabel,

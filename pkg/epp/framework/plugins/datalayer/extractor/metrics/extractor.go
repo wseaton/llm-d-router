@@ -136,6 +136,12 @@ func (ext *Extractor) Extract(ctx context.Context, in fwkdl.PollInput[sourcemetr
 		}
 	}
 
+	if spec := mapping.LoraAdapterLoaded; spec != nil { // extract per-adapter residency
+		if populateAdapterResidency(clone, spec, families) {
+			updated = true
+		}
+	}
+
 	if spec := mapping.CacheInfo; spec != nil { // extract CacheInfo-specific metrics (labels)
 		metric, err := spec.getLatestMetric(families)
 		if err != nil {
@@ -273,4 +279,32 @@ func addAdapters(m map[string]int, csv string) {
 			m[trimmed] = 0
 		}
 	}
+}
+
+// populateAdapterResidency reads vllm:lora_adapter_loaded series and
+// overwrites ActiveModels with GPU-warm adapters when the metric is present.
+func populateAdapterResidency(clone *fwkdl.Metrics, spec *Spec, families sourcemetrics.PrometheusMetricMap) bool {
+	family, exists := families[spec.Name]
+	if !exists || len(family.GetMetric()) == 0 {
+		return false
+	}
+
+	gpuAdapters := map[string]int{}
+	for _, metric := range family.GetMetric() {
+		var adapterName, level string
+		for _, label := range metric.GetLabel() {
+			switch label.GetName() {
+			case "adapter_name":
+				adapterName = label.GetValue()
+			case "level":
+				level = label.GetValue()
+			}
+		}
+		if adapterName != "" && level == "gpu" && extractValue(metric) > 0 {
+			gpuAdapters[adapterName] = 0
+		}
+	}
+
+	clone.ActiveModels = gpuAdapters
+	return true
 }
