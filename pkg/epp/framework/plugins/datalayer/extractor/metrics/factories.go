@@ -45,6 +45,8 @@ type (
 		KVUsageSpec string `json:"kvUsageSpec"`
 		// LoRASpec defines the metric specification string for retrieving LoRA availability.
 		LoRASpec string `json:"loraSpec"`
+		// LoraAdapterLoadedSpec defines the metric for per-adapter residency state.
+		LoraAdapterLoadedSpec string `json:"loraAdapterLoadedSpec,omitempty"`
 		// CacheInfoSpec defines the metric specification string for retrieving KV cache configuration
 		// from an info-style gauge where block_size and num_gpu_blocks are label values.
 		CacheInfoSpec string `json:"cacheInfoSpec"`
@@ -88,12 +90,13 @@ type (
 // Default engine configurations for vLLM, SGLang, trtllm-serve, triton-tensorrt-llm, and triton.
 var defaultEngineConfigs = []engineConfigParams{
 	{
-		Name:                "vllm",
-		QueuedRequestsSpec:  "vllm:num_requests_waiting",
-		RunningRequestsSpec: "vllm:num_requests_running",
-		KVUsageSpec:         "vllm:kv_cache_usage_perc",
-		LoRASpec:            "vllm:lora_requests_info",
-		CacheInfoSpec:       "vllm:cache_config_info",
+		Name:                    "vllm",
+		QueuedRequestsSpec:      "vllm:num_requests_waiting",
+		RunningRequestsSpec:     "vllm:num_requests_running",
+		KVUsageSpec:             "vllm:kv_cache_usage_perc",
+		LoRASpec:                "vllm:lora_requests_info",
+		LoraAdapterLoadedSpec:   "vllm:lora_adapter_loaded",
+		CacheInfoSpec:           "vllm:cache_config_info",
 	},
 	{
 		Name:                    "sglang",
@@ -216,6 +219,7 @@ func newCoreMetricsExtractorPlugin(ctx context.Context, name string, params *mod
 			Running:             engineConfig.RunningRequestsSpec,
 			KVUsage:             engineConfig.KVUsageSpec,
 			Lora:                engineConfig.LoRASpec,
+			LoraAdapterLoaded:   engineConfig.LoraAdapterLoadedSpec,
 			CacheInfo:           engineConfig.CacheInfoSpec,
 			CacheBlockSizeLabel: engineConfig.CacheBlockSizeLabelName,
 			CacheNumBlocksLabel: engineConfig.CacheNumBlocksLabelName,
