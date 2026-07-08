@@ -252,15 +252,21 @@ func (p *dataProducer) PreRequest(ctx context.Context, request *fwksched.Inferen
 }
 
 func (p *dataProducer) makeserver(targetEndpoint fwksched.Endpoint) server {
-	gpuBlocks := defaultLRUCapacityPerServer
+	capacity := defaultLRUCapacityPerServer
 	if p.config.AutoTune && targetEndpoint.GetMetrics() != nil && targetEndpoint.GetMetrics().CacheNumBlocks > 0 {
-		gpuBlocks = targetEndpoint.GetMetrics().CacheNumBlocks
+		capacity = targetEndpoint.GetMetrics().CacheNumBlocks
+		m := targetEndpoint.GetMetrics()
+		if m.KvCacheMaxTokenCapacity > 0 && m.CacheBlockSize > 0 {
+			if totalBlocks := m.KvCacheMaxTokenCapacity / m.CacheBlockSize; totalBlocks > capacity {
+				capacity = totalBlocks
+			}
+		}
 	} else if p.config.LRUCapacityPerServer > 0 {
-		gpuBlocks = p.config.LRUCapacityPerServer
+		capacity = p.config.LRUCapacityPerServer
 	}
 	return server{
 		ServerID:       ServerID(targetEndpoint.GetMetadata().NamespacedName),
-		NumOfGPUBlocks: gpuBlocks,
+		NumOfGPUBlocks: capacity,
 	}
 }
 
