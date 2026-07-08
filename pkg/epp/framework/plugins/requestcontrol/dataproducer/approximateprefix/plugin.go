@@ -32,6 +32,7 @@ import (
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 	approxprefixconstants "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/approximateprefix/constants"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/prefixhash"
 	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
 )
 
@@ -179,7 +180,7 @@ func (p *dataProducer) Produce(ctx context.Context, request *fwksched.InferenceR
 	if p.config.MaxPrefixTokensToMatch > 0 && blockSize > 0 {
 		maxBlocks = p.config.MaxPrefixTokensToMatch / blockSize
 	}
-	perPromptHashes := getBlockHashes(ctx, request, blockSize, maxBlocks)
+	perPromptHashes := prefixhash.GetBlockHashes(ctx, request, blockSize, maxBlocks)
 
 	prefixCacheServers := make(map[ServerID]int)
 	totalBlocks := 0
@@ -251,15 +252,21 @@ func (p *dataProducer) PreRequest(ctx context.Context, request *fwksched.Inferen
 }
 
 func (p *dataProducer) makeserver(targetEndpoint fwksched.Endpoint) server {
-	gpuBlocks := defaultLRUCapacityPerServer
+	capacity := defaultLRUCapacityPerServer
 	if p.config.AutoTune && targetEndpoint.GetMetrics() != nil && targetEndpoint.GetMetrics().CacheNumBlocks > 0 {
-		gpuBlocks = targetEndpoint.GetMetrics().CacheNumBlocks
+		capacity = targetEndpoint.GetMetrics().CacheNumBlocks
+		m := targetEndpoint.GetMetrics()
+		if m.KvCacheMaxTokenCapacity > 0 && m.CacheBlockSize > 0 {
+			if totalBlocks := m.KvCacheMaxTokenCapacity / m.CacheBlockSize; totalBlocks > capacity {
+				capacity = totalBlocks
+			}
+		}
 	} else if p.config.LRUCapacityPerServer > 0 {
-		gpuBlocks = p.config.LRUCapacityPerServer
+		capacity = p.config.LRUCapacityPerServer
 	}
 	return server{
 		ServerID:       ServerID(targetEndpoint.GetMetadata().NamespacedName),
-		NumOfGPUBlocks: gpuBlocks,
+		NumOfGPUBlocks: capacity,
 	}
 }
 
